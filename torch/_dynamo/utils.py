@@ -37,6 +37,7 @@ from typing import (
     DefaultDict,
     Dict,
     Iterator,
+    KeysView,
     List,
     Optional,
     Set,
@@ -860,16 +861,22 @@ def is_safe_constant(v):
     )
 
 
-def guard_if_dyn(arg):
+def specialize_symnode(arg):
     from .variables import ConstantVariable, SymNodeVariable
 
+    # Guard and specialize
     if isinstance(arg, SymNodeVariable):
-        # This is because SymNodeVariable intentionally doesn't define
-        # as_python_constant to avoid shunting down some codepaths
-        # that expect consts.   In this case, we know we definitely
-        # want to specialize though.
-        return arg.evaluate_expr()
-    elif isinstance(arg, ConstantVariable):
+        return ConstantVariable.create(arg.evaluate_expr())
+
+    return arg
+
+
+def guard_if_dyn(arg):
+    from .variables import ConstantVariable
+
+    arg = specialize_symnode(arg)
+
+    if isinstance(arg, ConstantVariable):
         return arg.as_python_constant()
 
     return arg
@@ -904,6 +911,7 @@ def check_numpy_ndarray_args(args, kwargs):
     )
 
 
+dict_keys: Type[KeysView[Any]] = type(dict().keys())
 dict_values: Type[ValuesView[Any]] = type(dict().values())
 odict_values: Type[ValuesView[Any]] = type(collections.OrderedDict().values())
 tuple_iterator: Type[Iterator[Any]] = type(iter(tuple()))
@@ -924,6 +932,12 @@ def product(it):
 def tuple_iterator_getitem(it, index):
     _, (obj,), start = it.__reduce__()
     return obj[start + index]
+
+
+def dict_keys_getitem(d, n):
+    from itertools import islice
+
+    return next(islice(iter(d), n, n + 1))
 
 
 def enum_repr(value, local):
@@ -998,16 +1012,35 @@ def dict_const_keys(value):
     }
 
 
-def dict_const_keys_repr(const_keys, *, local):
-    if any(isinstance(k, enum.Enum) for k in const_keys):
+def const_repr(x, *, local) -> str:
+    from .allowed_functions import is_builtin_callable
+
+    if isinstance(x, (list, tuple)):
+        elems_repr = ",".join(const_repr(s, local=local) for s in x)
+        if isinstance(x, list):
+            return f"[{elems_repr}]"
+        else:
+            assert isinstance(x, tuple)
+            if len(x) == 1:
+                return f"({elems_repr},)"
+            else:
+                return f"({elems_repr})"
+    elif isinstance(x, enum.Enum):
         # To workaround repr(Enum) returning invalid global reference before python 3.11
         # by calling enum_repr and removing quotes to render enum in guard code.
-        const_keys_str = f"{ {enum_repr(k, local=local) if isinstance(k, enum.Enum) else repr(k) for k in const_keys} }".replace(
-            "'", ""
-        )
+        return enum_repr(x, local=local).replace("'", "")
+    elif is_builtin_callable(x):
+        return x.__name__
     else:
-        const_keys_str = f"{const_keys!r}"
-    return const_keys_str
+        return f"{x!r}"
+
+
+def dict_const_keys_repr(const_keys, *, local) -> str:
+    keys_str = ",".join(const_repr(s, local=local) for s in const_keys)
+    if keys_str:
+        return "{" + keys_str + "}"
+    else:
+        return "set()"
 
 
 def global_key_name(key):
